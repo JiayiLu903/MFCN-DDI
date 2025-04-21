@@ -16,7 +16,7 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import MultiStepLR
 import logging
 import torch.nn.functional as F
-from torch.autograd import Variable  
+from torch.autograd import Variable  #用于封装张量，支持自动微分
 #from rdkit import Chem
 #from rdkit.Chem import rdchem
 #import dgl
@@ -58,10 +58,12 @@ def feature_vector(feature_dir,drugs):
     feature={}
     with open(feature_dir) as file1:
         data=csv.reader(file1)
+
         header = next(data)
-        if feature_dir != filename[4]:
+        if feature_dir != filename[5]:
             for d, emb in data:
                 if d in drugs:
+
                     feature[d] = torch.tensor(eval(emb), dtype=torch.float32)
         else:
             for d, smiles in data:
@@ -168,13 +170,14 @@ def early_stopping(recall_list, stopping_steps,min_epoch):
 
 class CapsuleLayer(nn.Module):
     def __init__(self, num_capsules, num_route_nodes, in_channels, out_channels, kernel_size=None, stride=None,
-                 num_iterations=3):
+                 num_iterations=4):
         super(CapsuleLayer, self).__init__()
 
         self.num_route_nodes = num_route_nodes
         self.num_iterations = num_iterations
 
         self.num_capsules = num_capsules
+
 
 
         if num_route_nodes != -1:
@@ -217,9 +220,10 @@ class CapsuleLayer(nn.Module):
 class CapsuleNet(nn.Module):
     def __init__(self):
         super(CapsuleNet, self).__init__()
-        self.inputdim1 = 800
-        self.inputdim2 = 5312
-        self.inputdim3 = 1024
+        self.inputdim1 = 800  #输入KG特征的维度（药物对）
+        self.inputdim2 = 5312    #输入分子指纹特征的维度（药物对）
+        self.inputdim3 = 1024   #输入分子图特征的维度（药物对）
+        self.inputdim4 = 4318   #输入药理学特征的维度（药物对）
         self.outputdim = 512
         self.capsnum2 = 32
         self.capslen2 = 32
@@ -232,11 +236,12 @@ class CapsuleNet(nn.Module):
         self.feature1 = nn.Linear(self.inputdim1,self.outputdim)
         self.feature2 = nn.Linear(self.inputdim2,self.outputdim)
         self.feature3 = nn.Linear(self.inputdim3,self.outputdim)
+        self.feature4 = nn.Linear(self.inputdim4, self.outputdim)
         self.batchnorm = nn.BatchNorm1d(self.outputdim)
 
-        self.primary_capsules = CapsuleLayer(num_capsules=3, num_route_nodes=-1, in_channels=self.outputdim, out_channels=32)
+        self.primary_capsules = CapsuleLayer(num_capsules=4, num_route_nodes=-1, in_channels=self.outputdim, out_channels=32)
 
-        self.digit_capsules = CapsuleLayer(num_capsules=self.capsnum2, num_route_nodes=3, in_channels=self.outputdim,
+        self.digit_capsules = CapsuleLayer(num_capsules=self.capsnum2, num_route_nodes=4, in_channels=self.outputdim,
                                            out_channels=self.capslen2)
 
         # self.digit_capsules2 = CapsuleLayer(num_capsules=self.capsnum3, num_route_nodes=self.capsnum2, in_channels=self.capslen2,
@@ -250,12 +255,13 @@ class CapsuleNet(nn.Module):
         # self.dropout = nn.Dropout(p=0.2)
 
 
-    def forward(self, f1,f2,f3):
+    def forward(self, f1,f2,f3,f4):
         x1 = self.feature1(f1)
         x2 = self.feature2(f2)
         x3 = self.feature3(f3)
+        x4 = self.feature4(f4)
 
-        x = torch.cat((x1,x2,x3),1)
+        x = torch.cat((x1,x2,x3,x4),1)
 
         # x = self.dropout(x)
 
@@ -276,9 +282,9 @@ class CapsuleNet(nn.Module):
 
 
 
-def extract_features(batch_data, kg_features, fp_features,fg_features):
+def extract_features(batch_data, kg_features, fp_features,fg_features,new_features):
 
-    emb1_list, emb2_list, emb3_list = [], [], []
+    emb1_list, emb2_list, emb3_list, emb4_list = [], [], [], []
 
 
     for i in batch_data:
@@ -293,24 +299,28 @@ def extract_features(batch_data, kg_features, fp_features,fg_features):
 
         emb3_list.append(torch.cat((fg_features[i[0]].to(device), fg_features[i[1]].to(device)), dim=-1))
 
+        emb4_list.append(torch.cat((new_features[i[0]].to(device), new_features[i[1]].to(device)), dim=-1))
+
 
 
 
     emb1 = torch.stack(emb1_list).to(device)
     emb2 = torch.stack(emb2_list).to(device)
     emb3 = torch.stack(emb3_list).to(device)
+    emb4 = torch.stack(emb4_list).to(device)
 
 
-    return emb1, emb2, emb3
+    return emb1, emb2, emb3, emb4
 
 
 class MyModel(nn.Module):
-    def __init__(self, kg_features, fp_features, fg_features):
+    def __init__(self, kg_features, fp_features, fg_features, new_features):
         super(MyModel, self).__init__()
 
         self.kg_features = kg_features
         self.fp_features = fp_features
         self.fg_features = fg_features
+        self.new_features = new_features
 
         if multi_class == True:
             self.fea_dim = 85
@@ -340,16 +350,16 @@ class MyModel(nn.Module):
         self.classifier_fc3 = nn.Sequential(nn.Linear(4096, self.fea_dim))
 
     def train_DDI_data(self, mode, train_data):
-        emb1, emb2, emb3 = extract_features(train_data, self.kg_features, self.fp_features, self.fg_features)
+        emb1, emb2, emb3, emb4 = extract_features(train_data, self.kg_features, self.fp_features, self.fg_features, self.new_features)
         # print(f"emb1 shape: {emb1.shape}, emb2 shape: {emb2.shape},emb3 shape: {emb3.shape}")
-        x = self.capsule_net(emb1, emb2, emb3)
+        x = self.capsule_net(emb1, emb2, emb3, emb4)
         out = self.classifier_fc3(self.classifier_fc2(self.classifier_fc1(x)))
         # print(f"x shape: {x.shape}, out shape: {out.shape}")
         return out
 
     def test_DDI_data(self, mode, test_data):
-        emb1, emb2, emb3 = extract_features(test_data, self.kg_features, self.fp_features, self.fg_features)
-        x = self.capsule_net(emb1, emb2, emb3)
+        emb1, emb2, emb3, emb4 = extract_features(test_data, self.kg_features, self.fp_features, self.fg_features, self.new_features)
+        x = self.capsule_net(emb1, emb2, emb3, emb4)
         out = self.classifier_fc3(self.classifier_fc2(self.classifier_fc1(x)))
         if multi_class == True:
             sm = nn.Softmax(dim=1)
@@ -446,7 +456,7 @@ def pos_weight():
     return pos_weight
 
 
-def Train(batch_size, n_epoch, kg_features, fp_features, fg_features):
+def Train(batch_size, n_epoch, kg_features, fp_features, fg_features, new_features):
     random.seed(2024)
     np.random.seed(2024)
     torch.manual_seed(2024)
@@ -476,7 +486,7 @@ def Train(batch_size, n_epoch, kg_features, fp_features, fg_features):
         print('第', i + 1, '折：')
         time0 = time.time()
         # '''
-        model = MyModel(kg_features, fp_features,fg_features)
+        model = MyModel(kg_features, fp_features,fg_features, new_features)
         model.to(device)
         logging.info(model)
 
@@ -568,7 +578,8 @@ def Train(batch_size, n_epoch, kg_features, fp_features, fg_features):
                 if (iter % 100) == 0:
                     logging.info('DDI Training: Epoch {:04d} Iter {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f}'
                             .format(epoch, iter, time.time() - time2, loss.item(), ddi_total_loss / iter))
-
+            # # 在每个 epoch 结束时清理 CUDA 内存
+            # torch.cuda.empty_cache()
 
             scheduler.step()
             if multi_class == True:
@@ -676,18 +687,19 @@ if __name__=='__main__':
 
     if multi_class == True:
         filename = ['Multi-Class Dataset.csv',
-                     'drug_KG_features_normalized_400d.csv','drug_fingerprints_combined.csv','drug_graph_features.csv',
+                     'drug_KG_features_normalized_400d.csv','drug_fingerprints_combined.csv','drug_graph_features.csv','drug_combined_features.csv',
                     'drug_smiles.csv']
     else:
         filename = ['Multi-Label Dataset.csv',
-                    'drug_KG_features_normalized_400d.csv','drug_fingerprints_combined.csv','drug_graph_features.csv',
+                    'drug_KG_features_normalized_400d.csv','drug_fingerprints_combined.csv','drug_graph_features.csv','drug_combined_features.csv',
                     'drug_smiles.csv']
         pos_weight=pos_weight()
 
     data_list, drugs = get_drugpair_info(filename[0], [], [])
-    kg_features = feature_vector(filename[1], drugs)
-    fp_features = feature_vector(filename[2], drugs)
-    fg_features = feature_vector(filename[3], drugs)
+    kg_features = feature_vector(filename[1], drugs)#KG特征
+    fp_features = feature_vector(filename[2], drugs)#分子指纹特征
+    fg_features = feature_vector(filename[3], drugs)  # 分子图特征
+    new_features = feature_vector(filename[4], drugs) # 药理学特征
     # smiles_list = feature_vector(filename[4], drugs)
 
 
@@ -696,4 +708,4 @@ if __name__=='__main__':
     print('数据划分over')
 
 
-    Train(batch_size=1024, n_epoch=200, kg_features=kg_features, fp_features=fp_features, fg_features=fg_features)
+    Train(batch_size=1024, n_epoch=100, kg_features=kg_features, fp_features=fp_features, fg_features=fg_features, new_features=new_features)
